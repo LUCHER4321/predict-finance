@@ -1,8 +1,8 @@
 ---
 title: "Análisis Predictivo de Precios de Acciones"
 output:
-  pdf_document: default
   html_document: default
+  pdf_document: default
 ---
 
 Este documento presenta un análisis predictivo de los precios de varias acciones utilizando diferentes modelos de series temporales.
