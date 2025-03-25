@@ -1,0 +1,204 @@
+---
+title: "Análisis Predictivo de Precios de Acciones"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+Este documento presenta un análisis predictivo de los precios de varias acciones utilizando diferentes modelos de series temporales.
+
+# Precios Normalizados de las Acciones
+
+El primer gráfico muestra la evolución de los precios normalizados de las acciones seleccionadas durante el último año:
+
+- **Normalización**: Los precios se han normalizado dividiendo cada valor por el precio más reciente, lo que permite comparar fácilmente el rendimiento relativo de las acciones ($\text{Precio Nomalizado}_i=\frac{\text{Precio}_i}{\text{Precio}_\text{Último}}$).
+
+- **Tendencia**: Las líneas muestran cómo cada acción ha evolucionado en relación con su precio actual.
+
+- **Comparación**: Podemos observar qué acciones han tenido peor rendimiento (líneas por encima de 1) o mejor rendimiento (líneas por debajo de 1) en el período analizado.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+library(dplyr)
+library(quantmod)
+library(ggplot2)
+library(flextable)
+library(tidyverse)
+library(zoo)
+library(forecast)
+```
+
+```{r setDates, warning=FALSE, include=FALSE}
+today <- Sys.Date() %>% as.Date()
+yd <- today %>% as.POSIXlt()
+yd$day <- yd$day - 1
+yesterday <- yd %>% as.Date()
+oya <- today %>% as.POSIXlt()
+oya$year <- oya$year - 1
+one.year.ago <- oya %>% as.Date()
+dates.between <- seq(from = one.year.ago, to = yesterday, by = "day")
+```
+
+```{r getData, warning=FALSE, include=FALSE}
+symbols <- c("AMZN", "AAPL", "005930.KS", "NFLX") #Input
+prices <- data.frame(row.names = dates.between)
+for (s in symbols) {
+  close.prices <- getSymbols(s, from = one.year.ago, auto.assign = F)[, 4]
+  close.prices.df <- data.frame(Date = close.prices %>% index(), Close = close.prices)
+  colnames(close.prices.df) <- c("Date", "Close")
+  full.dates.df <- data.frame(Date = dates.between)
+  merged.df <- merge(full.dates.df, close.prices.df, by = "Date", all.x = T)
+  prices[[s]] <- merged.df$Close
+}
+while(prices[prices %>% nrow(),] %>% is.na() %>% any()){
+  prices <- prices[-(prices %>% nrow()),]
+}
+while(prices[1,] %>% is.na() %>% any()){
+  prices <- prices[-1,]
+}
+```
+
+```{r displayData, echo=FALSE, warning=FALSE}
+normalizedPrices <- (prices / prices[prices %>% nrow(),][prices %>% col()]) %>% na.approx() %>% as.data.frame()
+row.names(normalizedPrices) <- prices %>% row.names()
+display <- normalizedPrices %>% mutate(Date = normalizedPrices %>% row.names() %>% as.Date()) %>% gather(key = Symbol, value = "Price", -Date)
+display$Symbol <- display$Symbol %>% as.factor()
+#display %>% summary()
+ggplot(data = display) + geom_hline(yintercept = 1, linetype = "dashed") + geom_line(mapping = aes(x = Date, y = Price, col = Symbol))
+```
+
+# Comparación de Modelos
+
+Para cada acción, se generó un gráfico comparando tres modelos de predicción:
+
+- **ARIMA**: Modelo autorregresivo integrado de media móvil, que captura tendencias y patrones en los datos.
+
+- **Holt-Winters**: Modelo de suavizado exponencial que considera tendencia y estacionalidad.
+
+- **NNR**: Red neuronal recurrente, un enfoque de machine learning para series temporales.
+
+```{r Models, echo=FALSE, warning=FALSE}
+arima <- c()
+holtWinters <- c()
+nnr <- c()
+arimaNormalized <- data.frame(row.names = normalizedPrices %>% row.names())
+holtWintersNormalized <- data.frame(row.names = normalizedPrices %>% row.names())
+nnrNormalized <- data.frame(row.names = normalizedPrices %>% row.names())
+for(s in symbols){
+  arima[[s]] <- normalizedPrices[, s] %>% auto.arima()
+  arimaNormalized[[s]] <- arima[[s]]$fitted %>% as.vector()
+  holtWinters[[s]] <- tryCatch({
+    normalizedPrices[, s] %>% HoltWinters(seasonal = "multiplicative")
+  },
+  error = function(cond) {
+    normalizedPrices[, s] %>% HoltWinters(gamma = F, seasonal = "multiplicative")
+  })
+  holtWintersNormalized[[s]] <- holtWinters[[s]]$fitted[1:(normalizedPrices %>% nrow())] %>% as.vector()
+  nnr[[s]] <- normalizedPrices[, s] %>% nnetar()
+  newNNR <- nnr[[s]]$fitted %>% as.vector()
+  newNNR[1] <- normalizedPrices[1, s]
+  nnrNormalized[[s]] <- newNNR %>% na.approx()
+}
+newNormalized <- normalizedPrices
+newNormalized$Date <- normalizedPrices %>% row.names() %>% as.Date()
+newNormalized$Origin <- "Observed"
+arimaNormalized$Date <- normalizedPrices %>% row.names() %>% as.Date()
+arimaNormalized$Origin <- "ARIMA"
+holtWintersNormalized$Date <- normalizedPrices %>% row.names() %>% as.Date()
+holtWintersNormalized$Origin <- "Holt Winters"
+nnrNormalized$Date <- normalizedPrices %>% row.names() %>% as.Date()
+nnrNormalized$Origin <- "NNR"
+newNormalized <- rbind(newNormalized, arimaNormalized, holtWintersNormalized, nnrNormalized)
+newNormalized <- newNormalized[newNormalized$Date %>% order(),]
+newNormalized$Origin <- newNormalized$Origin %>% as.factor()
+#newNormalized %>% summary()
+for(s in symbols){
+  p <- ggplot(data = newNormalized) + geom_hline(yintercept = 1, linetype = "dashed") + geom_line(mapping = aes(x = newNormalized$Date, y = newNormalized[[s]], col = Origin)) + labs(title = paste("Comparition for", s), x = "Date", y = "Normalized Price")
+  p %>% print()
+}
+```
+
+# Métrica de Evaluación: RMSE
+
+Se utilizó el Error Cuadrático Medio Raíz (RMSE) para evaluar los modelos:
+
+$$RMSE=\sqrt{\frac{\sum_{i=1}^n (\text{Valor Predicho}_i-\text{Valor Observado}_i)}{n}}$$
+
+Esta métrica mide la diferencia entre los valores predichos y observados, penalizando más los errores grandes. Para cada acción, se seleccionó el modelo con el menor RMSE.
+
+```{r Evaluation, echo=FALSE, warning=FALSE}
+RMSE <- data.frame(row.names = c("ARIMA", "Holt Winters", "NNR"))
+getRMSE <- function(model){
+  (model %>% accuracy() %>% as.data.frame())$RMSE
+}
+bestModels <- data.frame(row.names = " ")
+for(s in symbols){
+  RMSE[[s]] <- c(arima[[s]] %>% getRMSE(), holtWinters[[s]] %>% ts() %>% getRMSE(), nnr[[s]] %>% getRMSE())
+  bestModels[[s]] <- (RMSE %>% row.names())[RMSE[[s]] == RMSE[[s]] %>% min()]
+}
+bestModels %>% t() %>% as.data.frame() %>% knitr::kable(format = "markdown")
+```
+
+# Predicción
+
+El último gráfico combina:
+
+- **Datos históricos** (líneas continuas)
+
+- **Predicciones** (líneas discontinuas)
+
+Características:
+
+- Muestra los últimos días de datos históricos más las predicciones.
+
+- Cada color representa una acción diferente.
+
+- El cambio de estilo de línea (continua a discontinua) marca la transición entre datos reales y predicciones.
+
+- Las predicciones se generaron usando el mejor modelo (según RMSE) para cada acción.
+
+```{r Prediction, echo=FALSE, warning=FALSE}
+prediction <- function(model, n){
+  (model %>% forecast(., n) %>% as.data.frame())$`Point Forecast`
+}
+n <- 30 #Input
+predicts <- data.frame(row.names = (today %>% as.numeric()):(today %>% as.numeric() + n - 1) %>% as.Date())
+for(s in symbols){
+  predicts[[s]] <- switch(
+    bestModels[[s]],
+    "ARIMA" = arima,
+    "Holt Winters" = holtWinters,
+    "NNR" = nnr,
+  )[[s]] %>% prediction(n = n)
+}
+fillDates <- data.frame(row.names = (normalizedPrices %>% row.names() %>% as.Date() %>% as.numeric() %>% max() + 1):(predicts %>% row.names() %>% as.Date() %>% as.numeric() %>% min() - 1) %>% as.Date())
+for(s in symbols){
+  fillDates[[s]] <- NA
+}
+fillDates$Type <- "Observed"
+obsAndPred <- rbind(normalizedPrices %>% mutate(Type = "Observed"), fillDates, predicts %>% mutate(Type = "Predicted"))
+obsAndPred[, obsAndPred[1,] %>% sapply(., is.numeric)] <- obsAndPred[, obsAndPred[1,] %>% sapply(., is.numeric)] %>% na.approx()
+obsAndPred$Type <- obsAndPred$Type %>% factor(levels = c("Observed", "Predicted"))
+displayPredicts <- obsAndPred %>% mutate(Date = obsAndPred %>% row.names() %>% as.Date()) %>% gather(key = Symbol, value = "Price", -c(Date, Type))
+displayPredicts$Symbol <- displayPredicts$Symbol %>% as.factor()
+#displayPredicts %>% summary()
+ggplot(data = displayPredicts[displayPredicts$Date %>% as.numeric() >= today %>% as.numeric() - n,]) + geom_hline(yintercept = 1, linetype = "dashed") + geom_vline(xintercept = today, linetype = "dashed") + geom_line(mapping = aes(x = Date, y = Price, col = Symbol, linetype = Type))
+```
+
+# Interpretación de Resultados
+
+Este análisis permite:
+
+- Comparar el rendimiento relativo de diferentes acciones.
+
+- Evaluar qué modelo predictivo funciona mejor para cada acción.
+
+- Obtener una proyección a corto plazo (30 días) del comportamiento de los precios.
+
+Los inversores podrían usar esta información para:
+
+- Identificar acciones con tendencias alcistas o bajistas.
+
+- Tomar decisiones informadas basadas en predicciones cuantitativas.
+
+- Comparar el rendimiento de acciones de diferentes mercados.
